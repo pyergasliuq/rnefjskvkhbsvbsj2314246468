@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Telegram Bot для продажи лицензий Timecyc Editor
-Упрощенная версия с sqlite3 и ссылкой на Telegram для покупки
-"""
-
 import os
 import sqlite3
 import secrets
