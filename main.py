@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 # ПРОВЕРКА НАСТРОЕК
 # ============================================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_IDS = os.getenv("ADMIN_IDS", "")
-SELLER_USERNAME = os.getenv("SELLER_USERNAME", "")
+BOT_TOKEN="8407138929:AAFD2ZBIgXFyx054bU7Pik_3T6-e3jzPMpM"
+ADMIN_IDS="2080411409"
+SELLER_USERNAME="keedboy016"
 
 logger.info("=" * 50)
 logger.info("Timecyc Editor License System")
