@@ -8,10 +8,24 @@ from flask import Flask, request, jsonify
 import sqlite3
 import os
 from datetime import datetime
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 DB_FILE = "licenses.db"
+
+
+# Простая обработка CORS
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
 
 
 def get_db():
@@ -21,69 +35,100 @@ def get_db():
     return conn
 
 
-@app.route('/verify', methods=['POST'])
+@app.route('/verify', methods=['POST', 'OPTIONS'])
 def verify_license():
     """Проверить лицензию"""
-    data = request.get_json()
+    # Handle OPTIONS request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    logger.info("Received verification request")
+    
+    try:
+        data = request.get_json()
+    except Exception as e:
+        logger.error(f"Failed to parse JSON: {e}")
+        return jsonify({"valid": False, "reason": "Invalid JSON"}), 400
     
     if not data:
+        logger.warning("No data provided")
         return jsonify({"valid": False, "reason": "No data provided"}), 400
     
     key = data.get("key")
     hwid = data.get("hwid")
     
+    logger.info(f"Verifying key: {key[:10]}... for HWID: {hwid[:10] if hwid else 'None'}...")
+    
     if not key or not hwid:
+        logger.warning("Missing key or hwid")
         return jsonify({"valid": False, "reason": "Missing key or hwid"}), 400
     
-    conn = get_db()
-    cursor = conn.cursor()
+    # Check if database exists
+    if not os.path.exists(DB_FILE):
+        logger.error(f"Database {DB_FILE} not found!")
+        return jsonify({"valid": False, "reason": "Database not initialized"}), 500
     
-    # Проверяем ключ
-    cursor.execute("SELECT * FROM license_keys WHERE key = ?", (key,))
-    row = cursor.fetchone()
-    
-    if not row:
-        conn.close()
-        return jsonify({"valid": False, "reason": "Ключ не найден"}), 404
-    
-    # Проверка срока действия
     try:
-        expires_at = datetime.fromisoformat(row["expires_at"])
-        if datetime.now() > expires_at:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Проверяем ключ
+        cursor.execute("SELECT * FROM license_keys WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        
+        if not row:
+            logger.warning(f"Key not found: {key}")
             conn.close()
-            return jsonify({"valid": False, "reason": "Лицензия истекла"}), 403
-    except:
+            return jsonify({"valid": False, "reason": "Ключ не найден"}), 404
+    
+        # Проверка срока действия
+        try:
+            expires_at = datetime.fromisoformat(row["expires_at"])
+            if datetime.now() > expires_at:
+                logger.info(f"License expired: {key}")
+                conn.close()
+                return jsonify({"valid": False, "reason": "Лицензия истекла"}), 403
+        except Exception as e:
+            logger.error(f"Invalid expiration date: {e}")
+            conn.close()
+            return jsonify({"valid": False, "reason": "Invalid expiration date"}), 500
+        
+        # Проверка HWID
+        if row["activated"]:
+            if row["hwid"] != hwid:
+                logger.warning(f"HWID mismatch for key {key}")
+                conn.close()
+                return jsonify({
+                    "valid": False, 
+                    "reason": "Ключ привязан к другому устройству"
+                }), 403
+        else:
+            # Первая активация - обновляем HWID
+            logger.info(f"Activating license {key} for HWID {hwid[:10]}...")
+            cursor.execute("""
+                UPDATE license_keys 
+                SET activated = 1, hwid = ?, activated_at = CURRENT_TIMESTAMP
+                WHERE key = ?
+            """, (hwid, key))
+            conn.commit()
+        
+        # Вычисляем оставшиеся дни
+        days_left = (expires_at - datetime.now()).days
+        
+        logger.info(f"License verified successfully: {key}, days left: {days_left}")
+        
         conn.close()
-        return jsonify({"valid": False, "reason": "Invalid expiration date"}), 500
-    
-    # Проверка HWID
-    if row["activated"]:
-        if row["hwid"] != hwid:
-            conn.close()
-            return jsonify({
-                "valid": False, 
-                "reason": "Ключ привязан к другому устройству"
-            }), 403
-    else:
-        # Первая активация - обновляем HWID
-        cursor.execute("""
-            UPDATE license_keys 
-            SET activated = 1, hwid = ?, activated_at = CURRENT_TIMESTAMP
-            WHERE key = ?
-        """, (hwid, key))
-        conn.commit()
-    
-    # Вычисляем оставшиеся дни
-    days_left = (expires_at - datetime.now()).days
-    
-    conn.close()
-    
-    return jsonify({
-        "valid": True,
-        "plan": row["plan"],
-        "expires_at": row["expires_at"],
-        "days_left": max(0, days_left)
-    }), 200
+        
+        return jsonify({
+            "valid": True,
+            "plan": row["plan"],
+            "expires_at": row["expires_at"],
+            "days_left": max(0, days_left)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        return jsonify({"valid": False, "reason": f"Database error: {str(e)}"}), 500
 
 
 @app.route('/health', methods=['GET'])
