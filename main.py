@@ -3,7 +3,7 @@
 """
 Telegram Bot для продажи лицензий Timecyc Editor
 Работает с PHP API на Reg.ru + локальная SQLite база
-ИСПРАВЛЕННАЯ ВЕРСИЯ - с синхронизацией на сервер
+ЗАЩИЩЕННАЯ ВЕРСИЯ - с API ключом
 """
 
 import os
@@ -33,7 +33,19 @@ BOT_TOKEN        = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_IDS_STR    = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS        = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()] if ADMIN_IDS_STR else []
 SELLER_USERNAME  = os.getenv("SELLER_USERNAME", "your_telegram")
-API_URL          = os.getenv("API_URL", "https://pweper.ru/api.php")  # ← URL вашего API на Reg.ru
+API_URL          = os.getenv("API_URL", "https://pweper.ru/api.php")
+
+# ============================================================================
+# 🔐 СЕКРЕТНЫЙ API КЛЮЧ - ОБЯЗАТЕЛЬНО ИЗМЕНИТЕ!
+# ============================================================================
+# Это должен быть тот же ключ, что и в api.php!
+# Сгенерируйте случайный ключ, например:
+# import secrets; print(secrets.token_hex(32))
+
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "ЗАМЕНИТЕ_ЭТОТ_КЛЮЧ_НА_СЛУЧАЙНЫЙ_ОЧЕНЬ_ДЛИННЫЙ_СЕКРЕТНЫЙ_КОД_12345")
+
+# ============================================================================
+
 DB_FILE          = "licenses.db"
 
 PRICES = {
@@ -124,12 +136,12 @@ def _gen_key() -> str:
 
 
 # ============================================================================
-# ⚡ НОВАЯ ФУНКЦИЯ - СИНХРОНИЗАЦИЯ С СЕРВЕРОМ
+# 🔐 ЗАЩИЩЕННАЯ ФУНКЦИЯ - СИНХРОНИЗАЦИЯ С СЕРВЕРОМ
 # ============================================================================
 
 def sync_key_to_server(key: str, plan: str, expires_at: str) -> bool:
     """
-    Отправляет созданный ключ на сервер Reg.ru
+    Отправляет созданный ключ на сервер Reg.ru с API ключом
     
     Args:
         key: Ключ активации (например PWEPER-XXXXXXXX-XXXXXXXX-XXXXXXXX)
@@ -149,11 +161,18 @@ def sync_key_to_server(key: str, plan: str, expires_at: str) -> bool:
             "expires_at": expires_at
         }
         
+        # 🔐 Добавляем секретный ключ в заголовки
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": API_SECRET_KEY
+        }
+        
         logger.info(f"📤 Отправка ключа на сервер: {key}")
         logger.info(f"   URL: {url}")
         logger.info(f"   Данные: {payload}")
+        logger.info(f"   API ключ: {API_SECRET_KEY[:10]}...")
         
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
@@ -163,6 +182,12 @@ def sync_key_to_server(key: str, plan: str, expires_at: str) -> bool:
             else:
                 logger.error(f"❌ Сервер вернул ошибку: {data.get('error', 'Unknown error')}")
                 return False
+        elif response.status_code == 401:
+            logger.error(f"❌ API ключ отсутствует! Проверьте настройки.")
+            return False
+        elif response.status_code == 403:
+            logger.error(f"❌ Неверный API ключ! Убедитесь что в bot.py и api.php одинаковые ключи.")
+            return False
         else:
             logger.error(f"❌ Сервер вернул код {response.status_code}")
             logger.error(f"   Ответ: {response.text}")
@@ -211,12 +236,13 @@ def create_license(user_id: int, plan: str, method: str,
 
     logger.info(f"License created locally: {key} | user={user_id} | plan={plan} | method={method}")
     
-    # ⚡ НОВОЕ - Синхронизируем с сервером
+    # 🔐 Синхронизируем с сервером (с API ключом)
     sync_success = sync_key_to_server(key, plan, expires_at_str)
     if sync_success:
         logger.info(f"✅ Ключ {key} синхронизирован с сервером")
     else:
         logger.warning(f"⚠️ Ключ {key} создан локально, но НЕ синхронизирован с сервером!")
+        logger.warning(f"   Проверьте: API_SECRET_KEY в bot.py и api.php должны совпадать!")
     
     return key
 
@@ -692,12 +718,14 @@ async def cb_test_api(callback: types.CallbackQuery):
         resp = requests.get(f"{API_URL.rstrip('/api.php')}/api.php/health", timeout=10)
         if resp.status_code == 200:
             d = resp.json()
+            security_status = "🔐 Включена" if d.get('security') == 'enabled' else "⚠️ Не включена"
             text = (
                 f"✅ <b>API работает!</b>\n\n"
                 f"🌐 URL: {API_URL}\n"
                 f"📡 Статус: {d.get('status', '—')}\n"
                 f"💾 База: {d.get('database', '—')}\n"
                 f"🐘 PHP: {d.get('php_version', '—')}\n"
+                f"🔐 Безопасность: {security_status}\n"
                 f"🕐 Время: {d.get('timestamp', '—')}"
             )
         else:
@@ -728,12 +756,17 @@ async def cb_test_api(callback: types.CallbackQuery):
 
 async def main():
     logger.info("=" * 50)
-    logger.info("Timecyc Editor License Bot — Starting")
+    logger.info("Timecyc Editor License Bot — Starting (SECURED)")
     logger.info("=" * 50)
 
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         logger.error("BOT_TOKEN не задан!")
         return
+    
+    if API_SECRET_KEY == "ЗАМЕНИТЕ_ЭТОТ_КЛЮЧ_НА_СЛУЧАЙНЫЙ_ОЧЕНЬ_ДЛИННЫЙ_СЕКРЕТНЫЙ_КОД_12345":
+        logger.warning("⚠️ ВНИМАНИЕ! API_SECRET_KEY не изменен!")
+        logger.warning("⚠️ Обязательно установите уникальный секретный ключ!")
+        logger.warning("⚠️ Сгенерируйте ключ: python -c 'import secrets; print(secrets.token_hex(32))'")
 
     init_db()
 
@@ -743,6 +776,7 @@ async def main():
         logger.warning("ADMIN_IDS не заданы — админ-панель недоступна")
 
     logger.info(f"API URL: {API_URL}")
+    logger.info(f"API Key: {API_SECRET_KEY[:10]}... (первые 10 символов)")
     logger.info(f"Seller: @{SELLER_USERNAME}")
     logger.info("=" * 50)
 
