@@ -3,6 +3,7 @@
 """
 Telegram Bot для продажи лицензий Timecyc Editor
 Работает с PHP API на Reg.ru + локальная SQLite база
+ИСПРАВЛЕННАЯ ВЕРСИЯ - с синхронизацией на сервер
 """
 
 import os
@@ -32,7 +33,7 @@ BOT_TOKEN        = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_IDS_STR    = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS        = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()] if ADMIN_IDS_STR else []
 SELLER_USERNAME  = os.getenv("SELLER_USERNAME", "your_telegram")
-API_URL          = os.getenv("API_URL", "https://pweper.ru")
+API_URL          = os.getenv("API_URL", "https://pweper.ru/api.php")  # ← URL вашего API на Reg.ru
 DB_FILE          = "licenses.db"
 
 PRICES = {
@@ -122,15 +123,70 @@ def _gen_key() -> str:
             return key
 
 
+# ============================================================================
+# ⚡ НОВАЯ ФУНКЦИЯ - СИНХРОНИЗАЦИЯ С СЕРВЕРОМ
+# ============================================================================
+
+def sync_key_to_server(key: str, plan: str, expires_at: str) -> bool:
+    """
+    Отправляет созданный ключ на сервер Reg.ru
+    
+    Args:
+        key: Ключ активации (например PWEPER-XXXXXXXX-XXXXXXXX-XXXXXXXX)
+        plan: Тариф (1month, 3months, lifetime)
+        expires_at: Дата истечения в ISO формате
+    
+    Returns:
+        bool: True если ключ успешно добавлен на сервер, False если ошибка
+    """
+    try:
+        # URL endpoint для добавления ключа
+        url = f"{API_URL.rstrip('/api.php')}/api.php/add_key"
+        
+        payload = {
+            "key": key,
+            "plan": plan,
+            "expires_at": expires_at
+        }
+        
+        logger.info(f"📤 Отправка ключа на сервер: {key}")
+        logger.info(f"   URL: {url}")
+        logger.info(f"   Данные: {payload}")
+        
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                logger.info(f"✅ Ключ {key} успешно добавлен на сервер")
+                return True
+            else:
+                logger.error(f"❌ Сервер вернул ошибку: {data.get('error', 'Unknown error')}")
+                return False
+        else:
+            logger.error(f"❌ Сервер вернул код {response.status_code}")
+            logger.error(f"   Ответ: {response.text}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        logger.error(f"⏱️ Таймаут при отправке ключа на сервер")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка синхронизации с сервером: {e}")
+        return False
+
+
 def create_license(user_id: int, plan: str, method: str,
                    username: str = None, first_name: str = None) -> str:
-    """Создать лицензию в SQLite, вернуть ключ"""
+    """Создать лицензию в SQLite И на сервере, вернуть ключ"""
     key = _gen_key()
     expires_at = datetime.now() + timedelta(days=PRICES[plan]["days"])
+    expires_at_str = expires_at.isoformat()
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
+    # Сохраняем локально
     c.execute("""
         INSERT INTO users (user_id, username, first_name)
         VALUES (?, ?, ?)
@@ -142,7 +198,7 @@ def create_license(user_id: int, plan: str, method: str,
     c.execute("""
         INSERT INTO license_keys (key, user_id, plan, expires_at, payment_method)
         VALUES (?, ?, ?, ?, ?)
-    """, (key, user_id, plan, expires_at.isoformat(), method))
+    """, (key, user_id, plan, expires_at_str, method))
 
     if method != "admin_gift":
         c.execute("""
@@ -153,7 +209,15 @@ def create_license(user_id: int, plan: str, method: str,
     conn.commit()
     conn.close()
 
-    logger.info(f"License created: {key} | user={user_id} | plan={plan} | method={method}")
+    logger.info(f"License created locally: {key} | user={user_id} | plan={plan} | method={method}")
+    
+    # ⚡ НОВОЕ - Синхронизируем с сервером
+    sync_success = sync_key_to_server(key, plan, expires_at_str)
+    if sync_success:
+        logger.info(f"✅ Ключ {key} синхронизирован с сервером")
+    else:
+        logger.warning(f"⚠️ Ключ {key} создан локально, но НЕ синхронизирован с сервером!")
+    
     return key
 
 
@@ -239,90 +303,100 @@ def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     if is_admin:
         rows.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel")])
     rows += [
-        [InlineKeyboardButton(text="💎 Купить лицензию",  callback_data="buy")],
-        [InlineKeyboardButton(text="🔑 Мои лицензии",     callback_data="my_licenses")],
-        [InlineKeyboardButton(text="❓ Помощь",           callback_data="help")],
+        [InlineKeyboardButton(text="💎 Купить лицензию", callback_data="buy")],
+        [InlineKeyboardButton(text="🔑 Мои лицензии", callback_data="my_licenses")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="help")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def payment_method_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Telegram Stars",      callback_data="payment_stars")],
-        [InlineKeyboardButton(text="💬 Написать продавцу",  url=f"https://t.me/{SELLER_USERNAME}")],
-        [InlineKeyboardButton(text="◀️ Назад",               callback_data="start")],
-    ])
+def buy_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="⭐ Оплатить звёздами", callback_data="payment_stars")],
+        [InlineKeyboardButton(text=f"💬 Написать @{SELLER_USERNAME}", url=f"https://t.me/{SELLER_USERNAME}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def plans_kb(back_cb: str = "buy") -> InlineKeyboardMarkup:
+def plan_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
-            text=f"{info['name']} — {info['stars']} ⭐",
-            callback_data=f"plan_{key}"
-        )]
-        for key, info in PRICES.items()
+            text=f"{PRICES['1month']['name']} — {PRICES['1month']['stars']}⭐",
+            callback_data="plan_1month"
+        )],
+        [InlineKeyboardButton(
+            text=f"{PRICES['3months']['name']} — {PRICES['3months']['stars']}⭐",
+            callback_data="plan_3months"
+        )],
+        [InlineKeyboardButton(
+            text=f"{PRICES['lifetime']['name']} — {PRICES['lifetime']['stars']}⭐",
+            callback_data="plan_lifetime"
+        )],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="buy")]
     ]
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def admin_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Выдать ключ",    callback_data="admin_give_key")],
-        [InlineKeyboardButton(text="📊 Статистика",    callback_data="admin_stats")],
-        [InlineKeyboardButton(text="🔧 Тест API",      callback_data="admin_test_api")],
-        [InlineKeyboardButton(text="◀️ Назад",          callback_data="start")],
-    ])
 
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="start")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main")]
+    ])
+
+
+def admin_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Выдать ключ", callback_data="admin_give_key")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="🔧 Тест API", callback_data="admin_test_api")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main")]
     ])
 
 
 def admin_plan_kb() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=info["name"], callback_data=f"admin_plan_{key}")]
-        for key, info in PRICES.items()
-    ]
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=PRICES["1month"]["name"], callback_data="admin_plan_1month")],
+        [InlineKeyboardButton(text=PRICES["3months"]["name"], callback_data="admin_plan_3months")],
+        [InlineKeyboardButton(text=PRICES["lifetime"]["name"], callback_data="admin_plan_lifetime")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")]
+    ])
 
 
 # ============================================================================
-# /start и возврат в меню
+# КОМАНДЫ
 # ============================================================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    is_admin = message.from_user.id in ADMIN_IDS
-    name = message.from_user.first_name
-
+    user_id = message.from_user.id
+    is_admin = user_id in ADMIN_IDS
+    
     text = (
-        f"👋 Привет, {name}!\n\n"
-        f"🎨 <b>Timecyc Editor by Pweper</b>\n"
-        f"Профессиональный редактор timecyc для GTA.\n\n"
-        f"✨ <b>Возможности:</b>\n"
-        f"• Визуальное редактирование неба и погоды\n"
-        f"• Поддержка всех параметров timecyc\n"
-        f"• Предпросмотр в реальном времени\n"
-        f"• Экспорт в JSON\n\n"
-        f"💎 Выберите действие ниже:"
+        f"👋 <b>Добро пожаловать в Timecyc Editor!</b>\n\n"
+        f"Здесь вы можете приобрести лицензию на редактор timecyc для GTA San Andreas.\n\n"
+        f"💎 <b>Доступные тарифы:</b>\n"
+        f"• {PRICES['1month']['name']}: {PRICES['1month']['stars']}⭐\n"
+        f"• {PRICES['3months']['name']}: {PRICES['3months']['stars']}⭐\n"
+        f"• {PRICES['lifetime']['name']}: {PRICES['lifetime']['stars']}⭐\n\n"
+        f"🔑 После оплаты вы получите ключ активации."
     )
+    
     await message.answer(text, reply_markup=main_menu_kb(is_admin), parse_mode="HTML")
 
 
-@dp.callback_query(F.data == "start")
-async def cb_start(callback: types.CallbackQuery):
-    is_admin = callback.from_user.id in ADMIN_IDS
-    name = callback.from_user.first_name
-
+@dp.callback_query(F.data == "main")
+async def cb_main(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    is_admin = user_id in ADMIN_IDS
+    
     text = (
-        f"👋 Привет, {name}!\n\n"
-        f"🎨 <b>Timecyc Editor by Pweper</b>\n\n"
-        f"💎 Выберите действие:"
+        f"👋 <b>Главное меню</b>\n\n"
+        f"💎 <b>Доступные тарифы:</b>\n"
+        f"• {PRICES['1month']['name']}: {PRICES['1month']['stars']}⭐\n"
+        f"• {PRICES['3months']['name']}: {PRICES['3months']['stars']}⭐\n"
+        f"• {PRICES['lifetime']['name']}: {PRICES['lifetime']['stars']}⭐"
     )
+    
     await callback.message.edit_text(text, reply_markup=main_menu_kb(is_admin), parse_mode="HTML")
     await callback.answer()
 
@@ -335,90 +409,87 @@ async def cb_start(callback: types.CallbackQuery):
 async def cb_buy(callback: types.CallbackQuery):
     text = (
         "💳 <b>Выберите способ оплаты:</b>\n\n"
-        "⭐ <b>Telegram Stars</b> — мгновенная оплата\n"
-        f"💬 <b>Написать продавцу</b> — @{SELLER_USERNAME}\n\n"
-        "<i>При оплате продавцу напрямую ключ выдаётся вручную</i>"
+        "⭐ <b>Telegram Stars</b> — моментальная активация\n"
+        f"💬 <b>Написать продавцу</b> — @{SELLER_USERNAME}"
     )
-    await callback.message.edit_text(text, reply_markup=payment_method_kb(), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=buy_kb(), parse_mode="HTML")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "payment_stars")
 async def cb_payment_stars(callback: types.CallbackQuery):
-    text = (
-        "📦 <b>Выберите план подписки:</b>\n\n"
-        "1️⃣ <b>1 месяц</b> — базовая лицензия\n"
-        "3️⃣ <b>3 месяца</b> — выгодное предложение\n"
-        "♾️ <b>Навсегда</b> — безлимитный доступ\n\n"
-        "После покупки вы получите уникальный ключ активации."
-    )
-    await callback.message.edit_text(text, reply_markup=plans_kb(back_cb="buy"), parse_mode="HTML")
+    text = "📦 <b>Выберите тариф:</b>"
+    await callback.message.edit_text(text, reply_markup=plan_kb(), parse_mode="HTML")
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("plan_"))
-async def cb_plan_selected(callback: types.CallbackQuery):
-    plan  = callback.data.replace("plan_", "")
-    info  = PRICES[plan]
-    price = [LabeledPrice(label=f"Timecyc Editor — {info['name']}", amount=info["stars"])]
-
-    await bot.send_invoice(
-        chat_id=callback.from_user.id,
-        title=f"Timecyc Editor ({info['name']})",
-        description=f"Лицензия на {info['name']}",
-        payload=f"{plan}_stars_{callback.from_user.id}",
-        provider_token="",
-        currency="XTR",
-        prices=price,
-    )
-    await callback.answer("Счёт создан! Оплатите его для активации.")
+async def cb_plan(callback: types.CallbackQuery):
+    plan = callback.data.replace("plan_", "")
+    price = PRICES[plan]
+    
+    await callback.answer("Создаю счёт...", show_alert=False)
+    
+    try:
+        prices = [LabeledPrice(label=price["name"], amount=price["stars"])]
+        
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title=f"Timecyc Editor — {price['name']}",
+            description=f"Лицензия на {price['days']} дней",
+            payload=f"{plan}",
+            currency="XTR",
+            prices=prices
+        )
+        
+        await callback.message.edit_text(
+            "💳 <b>Счёт отправлен!</b>\n\nОплатите его, чтобы получить ключ.",
+            reply_markup=back_kb(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Invoice error: {e}")
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка создания счёта</b>\n\n{str(e)}",
+            reply_markup=back_kb(),
+            parse_mode="HTML"
+        )
 
 
 @dp.pre_checkout_query()
-async def pre_checkout(pcq: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pcq.id, ok=True)
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 
 @dp.message(F.successful_payment)
-async def successful_payment(message: types.Message):
-    payment = message.successful_payment
-    parts   = payment.invoice_payload.split("_")
-    plan    = parts[0]
-    user_id = int(parts[2])
-
+async def process_successful_payment(message: types.Message):
+    user_id = message.from_user.id
+    plan = message.successful_payment.invoice_payload
+    
     key = create_license(
-        user_id, plan, "stars",
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
+        user_id,
+        plan,
+        "telegram_stars",
+        message.from_user.username,
+        message.from_user.first_name
     )
-    add_transaction(user_id, plan, PRICES[plan]["stars"], "stars", key)
-
+    
+    add_transaction(user_id, plan, PRICES[plan]["stars"], "telegram_stars", key)
+    
     text = (
-        f"✅ <b>Оплата успешна!</b>\n\n"
+        f"✅ <b>Оплата прошла успешно!</b>\n\n"
         f"🔑 Ваш ключ активации:\n"
         f"<code>{key}</code>\n\n"
-        f"📱 <b>Как использовать:</b>\n"
+        f"📦 Тариф: {PRICES[plan]['name']}\n"
+        f"⏱ Срок действия: {PRICES[plan]['days']} дней\n\n"
+        f"<b>Как активировать:</b>\n"
         f"1. Запустите Timecyc Editor\n"
-        f"2. Введите этот ключ при первом запуске\n"
+        f"2. Введите ключ при первом запуске\n"
         f"3. Ключ привяжется к вашему компьютеру\n\n"
-        f"⏱ Срок действия: {PRICES[plan]['days']} дней\n"
-        f"💾 Сохраните ключ в надёжном месте!"
+        f"💾 Ключ также сохранён в разделе «Мои лицензии»"
     )
-    await message.answer(text, reply_markup=back_kb(), parse_mode="HTML")
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin_id,
-                f"💰 <b>Новая покупка!</b>\n\n"
-                f"👤 {message.from_user.id} (@{message.from_user.username})\n"
-                f"📦 План: {plan}\n"
-                f"⭐ Сумма: {PRICES[plan]['stars']}\n"
-                f"🔑 Ключ: <code>{key}</code>",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+    
+    await message.answer(text, parse_mode="HTML")
 
 
 # ============================================================================
@@ -427,23 +498,23 @@ async def successful_payment(message: types.Message):
 
 @dp.callback_query(F.data == "my_licenses")
 async def cb_my_licenses(callback: types.CallbackQuery):
-    licenses = get_user_licenses(callback.from_user.id)
-
+    user_id = callback.from_user.id
+    licenses = get_user_licenses(user_id)
+    
     if not licenses:
-        text = (
-            "🔑 <b>У вас пока нет лицензий</b>\n\n"
-            "Приобретите лицензию, чтобы начать использовать Timecyc Editor!"
-        )
+        text = "У вас пока нет лицензий.\n\nНажмите «Купить лицензию», чтобы приобрести."
     else:
         text = "🔑 <b>Ваши лицензии:</b>\n\n"
         for lic in licenses:
-            status    = "❌ Истекла" if lic["expired"] else f"✅ Активна ({lic['days_left']} дней)"
-            activated = "✓ Привязана" if lic["activated"] else "✗ Не активирована"
+            status = "✅ Активна" if not lic["expired"] else "❌ Истекла"
+            activated = "🔗 Привязана" if lic["activated"] else "⚠️ Не активирована"
+            
             text += (
                 f"<code>{lic['key']}</code>\n"
-                f"Статус: {status}\n"
-                f"Привязка: {activated}\n"
-                f"План: {lic['plan']}\n\n"
+                f"📦 План: {PRICES.get(lic['plan'], {}).get('name', lic['plan'])}\n"
+                f"📅 Осталось дней: {lic['days_left']}\n"
+                f"{status} | {activated}\n"
+                f"━━━━━━━━━━━━━━━\n"
             )
 
     await callback.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
@@ -618,7 +689,7 @@ async def cb_test_api(callback: types.CallbackQuery):
     await callback.answer("🔄 Тестирую API...", show_alert=False)
 
     try:
-        resp = requests.get(f"{API_URL}/api.php/health", timeout=10)
+        resp = requests.get(f"{API_URL.rstrip('/api.php')}/api.php/health", timeout=10)
         if resp.status_code == 200:
             d = resp.json()
             text = (
