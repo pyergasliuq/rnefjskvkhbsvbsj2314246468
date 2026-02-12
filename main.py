@@ -33,7 +33,7 @@ BOT_TOKEN        = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_IDS_STR    = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS        = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()] if ADMIN_IDS_STR else []
 SELLER_USERNAME  = os.getenv("SELLER_USERNAME", "your_telegram")
-API_URL          = os.getenv("API_URL", "https://pweper.ru/api.php")
+API_URL          = os.getenv("API_URL", "https://pweper.ru")
 
 # ============================================================================
 # 🔐 СЕКРЕТНЫЙ API КЛЮЧ - ОБЯЗАТЕЛЬНО ИЗМЕНИТЕ!
@@ -50,7 +50,7 @@ DB_FILE          = "licenses.db"
 
 PRICES = {
     "1month":   {"stars": 50,  "days": 30,    "name": "1 месяц"},
-    "3months":  {"stars": 120, "days": 90,    "name": "3 месяца"},
+    "3months":  {"stars": 100, "days": 90,    "name": "3 месяца"},
     "lifetime": {"stars": 250, "days": 36500, "name": "Навсегда"},
 }
 
