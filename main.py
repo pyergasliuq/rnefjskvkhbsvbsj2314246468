@@ -156,6 +156,7 @@ def sync_key_to_server(key: str, plan: str, expires_at: str) -> bool:
         url = f"{API_URL.rstrip('/api.php')}/api.php/add_key"
         
         payload = {
+            "secret": API_SECRET_KEY,
             "key": key,
             "plan": plan,
             "expires_at": expires_at
@@ -164,7 +165,7 @@ def sync_key_to_server(key: str, plan: str, expires_at: str) -> bool:
         # 🔐 Добавляем секретный ключ в заголовки
         headers = {
             "Content-Type": "application/json",
-            "X-API-Key": API_SECRET_KEY
+            "secret": API_SECRET_KEY
         }
         
         logger.info(f"📤 Отправка ключа на сервер: {key}")
